@@ -42,10 +42,12 @@ class DicomProcessorTool(BaseTool):
 
     def _apply_windowing(self, img: np.ndarray, center: float, width: float) -> np.ndarray:
         """Apply window/level adjustment to the image."""
-        img_min = center - width // 2
-        img_max = center + width // 2
+        if width <= 0:
+            width = 1.0
+        img_min = center - width / 2.0
+        img_max = center + width / 2.0
         img = np.clip(img, img_min, img_max)
-        img = ((img - img_min) / (width) * 255).astype(np.uint8)
+        img = ((img - img_min) / width * 255.0).astype(np.uint8)
         return img
 
     def _process_dicom(
@@ -58,15 +60,20 @@ class DicomProcessorTool(BaseTool):
         dcm = pydicom.dcmread(dicom_path)
         img = dcm.pixel_array.astype(float)
 
+        photometric = str(getattr(dcm, "PhotometricInterpretation", "")).strip().upper()
+        # Invert MONOCHROME1 so 0 is dark and maximum is bright (radiologic standard display)
+        if photometric == "MONOCHROME1":
+            img = img.max() - img
+
         # Apply manufacturer's recommended windowing if available and not overridden
         if window_center is None and hasattr(dcm, "WindowCenter"):
             window_center = dcm.WindowCenter
-            if isinstance(window_center, list):
+            if isinstance(window_center, (list, tuple)):
                 window_center = window_center[0]
 
         if window_width is None and hasattr(dcm, "WindowWidth"):
             window_width = dcm.WindowWidth
-            if isinstance(window_width, list):
+            if isinstance(window_width, (list, tuple)):
                 window_width = window_width[0]
 
         # Apply rescale slope/intercept if available
@@ -74,15 +81,20 @@ class DicomProcessorTool(BaseTool):
             img = img * dcm.RescaleSlope + dcm.RescaleIntercept
 
         # Apply windowing if parameters are available
-        if window_center is not None and window_width is not None:
+        if window_center is not None and window_width is not None and window_width > 0:
             img = self._apply_windowing(img, window_center, window_width)
         else:
-            img = ((img - img.min()) / (img.max() - img.min()) * 255).astype(np.uint8)
+            diff = img.max() - img.min()
+            if diff > 0:
+                img = ((img - img.min()) / diff * 255.0).astype(np.uint8)
+            else:
+                img = np.zeros_like(img, dtype=np.uint8)
 
         metadata = {
             "PatientID": getattr(dcm, "PatientID", None),
             "StudyDate": getattr(dcm, "StudyDate", None),
             "Modality": getattr(dcm, "Modality", None),
+            "PhotometricInterpretation": photometric,
             "PixelSpacing": getattr(dcm, "PixelSpacing", None),
             "WindowCenter": window_center,
             "WindowWidth": window_width,
