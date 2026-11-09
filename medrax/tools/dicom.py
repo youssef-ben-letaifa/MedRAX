@@ -1,3 +1,7 @@
+import os
+import json
+import shutil
+import subprocess
 from typing import Dict, Optional, Tuple, Type
 from pathlib import Path
 import uuid
@@ -8,6 +12,26 @@ from PIL import Image
 from pydantic import BaseModel, Field
 from langchain_core.callbacks import AsyncCallbackManagerForToolRun, CallbackManagerForToolRun
 from langchain_core.tools import BaseTool
+
+
+def _find_rust_engine() -> Optional[str]:
+    """Find the medrax-dicom Rust engine executable if available."""
+    if env_bin := os.getenv("MEDRAX_DICOM_BIN"):
+        if os.path.isfile(env_bin):
+            return env_bin
+
+    base_dir = Path(__file__).resolve().parents[2]
+    candidates = [
+        base_dir / "crates" / "medrax-core" / "target" / "release" / "medrax-dicom.exe",
+        base_dir / "crates" / "medrax-core" / "target" / "release" / "medrax-dicom",
+        base_dir / "crates" / "medrax-core" / "target" / "debug" / "medrax-dicom.exe",
+        base_dir / "crates" / "medrax-core" / "target" / "debug" / "medrax-dicom",
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+
+    return shutil.which("medrax-dicom")
 
 
 class DicomProcessorInput(BaseModel):
@@ -123,8 +147,61 @@ class DicomProcessorTool(BaseTool):
         Returns:
             Tuple[Dict, Dict]: Output dictionary with processed image path and metadata dictionary
         """
+        # Attempt accelerated Rust processing first
+        rust_engine = _find_rust_engine()
+        if rust_engine and Path(dicom_path).is_file():
+            try:
+                output_path = self.temp_dir / f"processed_dicom_{uuid.uuid4().hex[:8]}.png"
+                cmd = [
+                    rust_engine,
+                    "process-file",
+                    "--input",
+                    str(dicom_path),
+                    "--output",
+                    str(output_path),
+                ]
+                if window_center is not None:
+                    cmd.extend(["--window-center", str(window_center)])
+                if window_width is not None:
+                    cmd.extend(["--window-width", str(window_width)])
+
+                res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+                data = json.loads(res.stdout)
+                output = {"image_path": str(output_path)}
+                raw_meta = data.get("metadata", {})
+                metadata = {
+                    "PatientID": raw_meta.get("patient_id"),
+                    "patient_id": raw_meta.get("patient_id"),
+                    "StudyDate": raw_meta.get("study_date"),
+                    "study_date": raw_meta.get("study_date"),
+                    "Modality": raw_meta.get("modality"),
+                    "modality": raw_meta.get("modality"),
+                    "PhotometricInterpretation": raw_meta.get("photometric_interpretation"),
+                    "photometric_interpretation": raw_meta.get("photometric_interpretation"),
+                    "PixelSpacing": raw_meta.get("pixel_spacing"),
+                    "pixel_spacing": raw_meta.get("pixel_spacing"),
+                    "WindowCenter": raw_meta.get("window_center"),
+                    "window_center": raw_meta.get("window_center"),
+                    "WindowWidth": raw_meta.get("window_width"),
+                    "window_width": raw_meta.get("window_width"),
+                    "RescaleSlope": raw_meta.get("rescale_slope"),
+                    "rescale_slope": raw_meta.get("rescale_slope"),
+                    "RescaleIntercept": raw_meta.get("rescale_intercept"),
+                    "rescale_intercept": raw_meta.get("rescale_intercept"),
+                    "BitsStored": raw_meta.get("bits_stored"),
+                    "bits_stored": raw_meta.get("bits_stored"),
+                    "original_path": dicom_path,
+                    "output_path": str(output_path),
+                    "engine": "rust-medrax-core",
+                    "analysis_status": "completed",
+                }
+                return output, metadata
+            except Exception:
+                # If Rust execution encounters an issue, gracefully fall back to Python
+                pass
+
         try:
-            # Process DICOM and save as PNG
+            # Python fallback: process DICOM and save as PNG
             img_array, metadata = self._process_dicom(dicom_path, window_center, window_width)
             output_path = self.temp_dir / f"processed_dicom_{uuid.uuid4().hex[:8]}.png"
             Image.fromarray(img_array).save(output_path)
@@ -137,6 +214,7 @@ class DicomProcessorTool(BaseTool):
                 {
                     "original_path": dicom_path,
                     "output_path": str(output_path),
+                    "engine": "python-fallback",
                     "analysis_status": "completed",
                 }
             )

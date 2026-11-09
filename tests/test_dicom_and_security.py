@@ -15,6 +15,7 @@ def test_dicom_processor_monochrome2(tmp_path):
     assert "image_path" in output
     assert os.path.exists(output["image_path"])
     assert metadata["analysis_status"] == "completed"
+    assert metadata["engine"] == "rust-medrax-core"
     assert metadata["Modality"] == "CR"
     assert metadata["PhotometricInterpretation"] == "MONOCHROME2"
     assert metadata["PatientID"] == "LIDC-IDRI-0010"
@@ -50,3 +51,4 @@ def test_safe_parsing_replaces_eval():
     parsed_json = json.loads(json_payload)
     assert isinstance(parsed_json, list)
     assert parsed_json[0]["image_path"] == "temp/bar.png"
+
