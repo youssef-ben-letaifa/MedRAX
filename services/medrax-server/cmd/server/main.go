@@ -86,6 +86,7 @@ func main() {
 	mux.HandleFunc("/metrics", handlers.MetricsHandler(startTime, workerPool))
 	mux.HandleFunc("/api/v1/dicom/process", handlers.DicomProcessHandler(engineCfg))
 	mux.HandleFunc("/api/v1/reason", handlers.ReasonHandler(workerPool))
+	mux.HandleFunc("/api/v1/reason/stream", handlers.ReasonStreamHandler(workerPool))
 
 	// Job tracking
 	mux.HandleFunc("/api/v1/jobs", handlers.JobsListHandler(workerPool))

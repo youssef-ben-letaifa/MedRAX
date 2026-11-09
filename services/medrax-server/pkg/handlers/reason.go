@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -150,6 +151,102 @@ func JobsListHandler(pool *queue.Pool) http.HandlerFunc {
 			"count": len(jobs),
 			"jobs":  jobs,
 		})
+	}
+}
+
+// ReasonStreamHandler streams real-time agent updates and tool traces using Server-Sent Events (SSE)
+func ReasonStreamHandler(pool *queue.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, `{"error":"streaming unsupported"}`, http.StatusInternalServerError)
+			return
+		}
+
+		if r.Method != http.MethodPost {
+			http.Error(w, `{"error":"method not allowed; use POST"}`, http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req models.ReasonRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"error":"invalid JSON payload"}`, http.StatusBadRequest)
+			return
+		}
+
+		if strings.TrimSpace(req.Query) == "" {
+			http.Error(w, `{"error":"query cannot be empty"}`, http.StatusBadRequest)
+			return
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+
+		job, err := pool.Enqueue(req)
+		if err != nil {
+			fmt.Fprintf(w, "event: error\ndata: {\"error\":%q}\n\n", err.Error())
+			flusher.Flush()
+			return
+		}
+
+		fmt.Fprintf(w, "event: status\ndata: {\"job_id\":%q,\"status\":\"queued\"}\n\n", job.ID)
+		flusher.Flush()
+
+		ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
+		defer cancel()
+
+		ticker := time.NewTicker(25 * time.Millisecond)
+		defer ticker.Stop()
+
+		lastStatus := models.StatusQueued
+		sentTraces := 0
+
+		for {
+			select {
+			case <-ctx.Done():
+				fmt.Fprintf(w, "event: error\ndata: {\"error\":\"request context cancelled or timed out\"}\n\n")
+				flusher.Flush()
+				return
+			case <-ticker.C:
+				current, found := pool.GetJob(job.ID)
+				if !found {
+					fmt.Fprintf(w, "event: error\ndata: {\"error\":\"job not found\"}\n\n")
+					flusher.Flush()
+					return
+				}
+
+				if current.Status != lastStatus {
+					fmt.Fprintf(w, "event: status\ndata: {\"job_id\":%q,\"status\":%q}\n\n", current.ID, current.Status)
+					flusher.Flush()
+					lastStatus = current.Status
+				}
+
+				for sentTraces < len(current.ToolTraces) {
+					traceJSON, _ := json.Marshal(current.ToolTraces[sentTraces])
+					fmt.Fprintf(w, "event: trace\ndata: %s\n\n", string(traceJSON))
+					flusher.Flush()
+					sentTraces++
+				}
+
+				if current.Status == models.StatusCompleted || current.Status == models.StatusFailed {
+					resJSON, _ := json.Marshal(models.ReasonResponse{
+						JobID:       current.ID,
+						Status:      current.Status,
+						Answer:      current.Answer,
+						ToolTraces:  current.ToolTraces,
+						DurationSec: current.DurationSec,
+						Error:       current.Error,
+						CreatedAt:   current.CreatedAt,
+						FinishedAt:  current.FinishedAt,
+					})
+					fmt.Fprintf(w, "event: complete\ndata: %s\n\n", string(resJSON))
+					flusher.Flush()
+					return
+				}
+			}
+		}
 	}
 }
 

@@ -178,3 +178,31 @@ func TestDicomProcessHandler_File(t *testing.T) {
 	}
 }
 
+func TestReasonStreamHandler(t *testing.T) {
+	pool := createTestPool()
+	defer pool.Shutdown(1 * time.Second)
+
+	streamH := ReasonStreamHandler(pool)
+
+	reqPayload := models.ReasonRequest{
+		Query: "Stream clinical reasoning test",
+	}
+	body, _ := json.Marshal(reqPayload)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/reason/stream", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+
+	streamH(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected 200 OK, got %d: %s", w.Code, w.Body.String())
+	}
+
+	bodyStr := w.Body.String()
+	if !strings.Contains(bodyStr, "event: status") {
+		t.Errorf("Expected SSE status event, got: %s", bodyStr)
+	}
+	if !strings.Contains(bodyStr, "event: complete") {
+		t.Errorf("Expected SSE complete event, got: %s", bodyStr)
+	}
+}
+
