@@ -94,3 +94,4 @@ def test_agent_error_handling_in_tool(tmp_path):
     assert len(messages) == 2
     assert "Error executing tool failing_tool" in messages[0].content
     assert "invalid tool" in messages[1].content
+
